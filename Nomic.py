@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 from discord.utils import get
-import random
+import random as rnd
 import openpyxl
 import asyncio
 import datetime as dt
@@ -9,11 +9,89 @@ import datetime as dt
 #token.txt is a file not uploaded to git, containing the bot token and server name
 with open("token.txt", 'r') as f:
     token = f.readline()[:-1]
+    botID = f.readline()[:-1]
     serverName = f.readline()
 
 client = discord.Client()
-bot = commands.Bot(command_prefix='~')
+bot = commands.Bot(command_prefix='~', case_insensitive = True)
 bot.remove_command('help')
+
+'''
+player.currentVote
+0 : Non-vote
+1 : Yes
+2 : No
+-1 : Forfeit
+-2 : Non-player
+
+Turn is the index of the current players turn, or the next player in the case where the game is between turns
+It skips players who have left the game, and loops back to 0
+globalTurn is the actual turn of the game. It only increments by 1
+
+state
+0 : The previous turn has ended, and the bot is waiting for historians to formalise the end of the turn and start the next
+1 : The current player is writing a proposal to to be discussed and voted on
+2 : A proposal has been made and player can vote for it
+
+
+turn.end
+0 : All votes
+1 : Sufficient votes
+2 : Out of proposal time
+3 : Out of voting time
+'''
+
+
+players = []
+class Player(object):
+    def __init__(self, discObj, globalTurn):
+        self.discord = discObj
+        self.points = 0
+        self.stillPlaying = True
+        if game.state != 2:
+            self.currentVote = None
+        else:
+            self.currentVote = -2
+        self.voteHistory = [-2] * globalTurn
+        self.online = True
+        statNames = ['messages','daysPlaying','daysOnline','proposals','firstVotes','lastVotes']
+        self.stats = {i : 0 for i in statNames}
+    def __repr__(self):
+        try:
+            return self.discord.display_name
+        except:
+            return self.discord
+
+
+turns = []
+class Turn(object):
+    def __init__(self, turn):
+        self.turnNumber = turn
+        self.proponent = None
+        self.passed = None
+        self.end = None
+    def __repr__(self):
+        try:
+            return str(self.turnNumber) + ': ' + str(self.proponent.display_name)
+        except:
+            return str(self.turnNumber) + ': ' + str(self.proponent)
+
+
+game = None
+class Parameters(object):
+    def __init__(self):
+        self.turn = None
+        self.globalTurn = None
+        self.state = None
+        self.proposalTime = None
+        self.votingTime = None
+        self.yesProportion = None
+        self.firstVote = None
+        self.lastVote = None
+    def __repr__(self):
+        return 'Turn:' + str(self.globalTurn) + '  State:' + str(self.state)
+
+
 
 #Excel sheets
 wb = openpyxl.load_workbook('Nomic.xlsx')
@@ -21,125 +99,74 @@ ws1 = wb['Players']
 ws2 = wb['Turns']
 ws3 = wb['Misc']
 
-'''
-Players is a list of all players in turn order. This turn order is used for all other lists
-Includes players who have left the game, so that if they rejoin they retain the same stats
+def loadData():
+    global game, players, turns
+    if game is not None:
+        return
+    game = Parameters()
+    game.turn = ws3['B3'].value
+    game.globalTurn = ws3['B4'].value
+    game.state = ws3['B5'].value
+    game.firstVote = ws3['B7'].value
+    game.lastVote = get(players, discord__id = ws3['B8'].value)
+    game.proposalTime = ws3['B10'].value
+    game.votingTime = ws3['B11'].value
+    game.yesProportion = ws3['B12'].value
 
-StillPlaying is a list of whether or not a player is still playing
-0 : No longer playing
-1 : Current player
+    for i in range(ws3['B1'].value):
+        nextPlayer = get(nomicServer.members, id=int(ws1.cell(3, i+2).value))
+        nextPlayer = Player(nextPlayer, game.globalTurn)
+        if nextPlayer.discord is None:
+            nextPlayer.discord = ws1.cell(1, i+2).value
+        nextPlayer.stillPlaying = ws1.cell(5, i+2).value
+        nextPlayer.stillPlaying = ws1.cell(6, i+2).value
+        nextPlayer.currentVote = ws1.cell(7, i+2).value
+        nextPlayer.online = ws1.cell(8, i+2).value
+        for j in range(game.globalTurn):
+            nextPlayer.voteHistory[j] = ws2.cell(j+3, i+6).value
+            nextPlayer.points[j] = ws3.cell(j+3,i+9).value
+        j = 11
+        for k in nextPlayer.stats:
+            nextPlayer.stats[k] = ws1.cell(j, i+2).value
+            j += 1
+        players.append(nextPlayer)
 
-VoteHistory is an array where each row is one turn, and each column is the vote from each player
-0 : Non-vote
-1 : Yes
-2 : No
--1 : Forfeit
-The third to last column is the player id of the proponent
-The second to last column is whether or not the proposal passed
-0 : Failed   1 : Passed
-The last column is the global turn
-
-Turn is the index of the current players turn, or the next player in the case where the game is between turns
-It skips players who have left the game, and loops back to 0
-globalTurn is the actual turn of the game. It only increments by 1
-
-State is an integer describing what part of the turn the game is in. Many commands only work during specific states
-0 : The previous turn has ended, and the bot is waiting for historians to formalise the end of the turn and start the next
-1 : The current player is writing a proposal to to be discussed and voted on
-2 : A proposal has been made and player can vote for it
-
-
-
-Stats is an array where each row is a different stat being tracked, and each column is a player in turn order
-0 : Total messages sent
-1 : Total number of days as a player
-2 : Total number of days online as a player
-3 : Total number of proposals made
-Daily stats are updated at the end of the day
-
-
-
-The following variables reset each turn
-Votes is a list of what each player has voted, in turn order
-0 : Non-vote
-1 : Yes
-2 : No
--1 : Forfeit
--2 : Non-player
-
-Yesses is the number of yes votes for the current proposal
-Nos is the number of no votes for the current proposal
-'''
+    for i in range(game.globalTurn):
+        nextTurn = Turn(i)
+        nextTurn.proponent = get(nomicServer.members, id=int(ws2.cell(i+3, 2).value))
+        if nextTurn.proponent is None:
+            nextTurn.proponent = ws2.cell(i+3, 3).value
+        nextTurn.passed = ws2.cell(i+3, 4).value
+        nextTurn.end = ws2.cell(i+3, 5).value
+        turns.append(nextTurn)
 
 
+setup = False
 @bot.event
 async def on_ready():
-    global nomicServer, botMember, generalChannel, votingChannel, playerRole
+    if setup:
+        return
+    setup = True
+    global nomicServer, botMember, botChannel, updateChannel, votingChannel, playerRole
     #Commonly used channels and roles
-    nomicServer = get(bot.guilds, name=serverName)
-    botMember = get(nomicServer.members, id=376215780083367936)
+    nomicServer = get(bot.guilds, name='Nomic')
+    botMember = get(nomicServer.members, id=int(botID))
 
-    generalChannel = get(nomicServer.channels, name='general')
+    botChannel = get(nomicServer.channels, name='bot-commands')
+    updateChannel = get(nomicServer.channels, name='game-updates')
     votingChannel = get(nomicServer.channels, name='voting')
 
     playerRole = get(nomicServer.roles, name='Player')
 
-    #Load excel data
-    global turn, globalTurn, state, players, stillPlaying, voteHistory, stats, votes, yesses, nos, proposalTime, votingTime, yesProportion, online
-    numPlayers = ws3['B1'].value
-    turn = ws3['B3'].value
-    globalTurn = ws3['B4'].value
-    state = ws3['B5'].value
-    proposalTime = ws3['B13'].value
-    votingTime = ws3['B14'].value
-    yesProportion = ws3['B16'].value
-
-    players = []
-    stillPlaying = []
-    votes = []
-    yesses = 0
-    nos = 0
-    for i in range(numPlayers):
-        players.append(get(nomicServer.members, id=int(ws1.cell(3, i+2).value)))
-        if players[i] == None:
-            players[i] = ws1.cell(1, i+2).value
-        stillPlaying.append(ws1.cell(5, i+2).value)
-        if ws3['B9'].value == 0:
-            votes.append(ws3.cell(8, i+2).value)
-            if votes[i] == 1:
-                yesses += 1
-            elif votes[i] == 2:
-                nos += 1
-
-    voteHistory = []
-    for i in range(globalTurn):
-        turnVotes = []
-        for j in range(numPlayers + 2):
-            turnVotes.append(ws2.cell(i+4, j+2).value)
-        proponent = get(nomicServer.members, id=int(turnVotes[numPlayers]))
-        if proponent is not None:
-            turnVotes[numPlayers+1] = proponent.display_name
-        voteHistory.append(turnVotes + [i])
-
-    stats = []
-    for i in range(ws3['B11'].value):
-        statRow = []
-        for j in range(numPlayers):
-            statRow.append(ws1.cell(i+8, j+2).value)
-        stats.append(statRow)
-    bot.loop.create_task(daily())
-
-    online = []
-    for i in range(numPlayers):
-        online.append(ws3.cell(7, i+2))
+    loadData()
 
     #Initial state role
     await bot.change_presence(activity=discord.Game(name='~help'))
     for role in nomicServer.roles:
-        if role.name.startswith('Game State :'):
+        if role.name.startswith('Game State:'):
             await role.delete()
-    roleNames = ['Game State : Waiting', 'Game State : Proposing', 'Game State : Voting']
-    newRole = await nomicServer.create_role(name=roleNames[state], colour=discord.Colour(0x992d22), hoist=True)
+    roleNames = ['Game State: Waiting', 'Game State: Proposing', 'Game State: Voting']
+    newRole = await nomicServer.create_role(name=roleNames[game.state], colour=discord.Colour(0x992d22), hoist=True)
     await botMember.add_roles(newRole)
 
     print("Bot is ready")
@@ -151,11 +178,11 @@ Displays this message
 
 ~join
 Gives a non-player the player role and adds them into the turn order in a random position
-Called by non-players in #general at any time
+Called by non-players in #bot-commands at any time
 
 ~ready
 Causes the game to move from a state of waiting to the start of the next turn
-Called by historians in #general during the waiting phase
+Called by historians in #bot-commands during the waiting phase
 
 ~propose
 Begins the voting process once the current player has made a proposal
@@ -163,307 +190,351 @@ Called by the current player in #voting during the proposal phase
 
 ~yes/no
 Votes for or against the current proposal
-Called by players during the voting phase
+Called by players in #voting during the voting phase
 
-~tz
-Gives the user a time zone role
-One argument *X, where * is either + or -, and X is <= 13, except for -0
-A player can only have one time zone role, and the bot can create these roles when they don't exist, and delete them when there are no longer any users
-Called by anyone in #general at any time
+~save
+Saves the data the bot has, to be used before the bot shuts down
 ```"""
 
 @bot.command()
 async def help(ctx):
     await ctx.author.send(helpText)
 
+@bot.command()
+async def save(ctx):
+    await saveData()
 
-@bot.command(name='join')
-async def joinGame(ctx):
+
+@bot.command()
+async def join(ctx):
     global players
-    if ctx.channel == generalChannel:
-        try:
-            #When the author is/was part of the game
-            index = players.index(ctx.author)
-            if stillPlaying[index] == 1:
-                await generalChannel.send("You are already a player")
-            else:
-                stillPlaying[index] = 1
-                await generalChannel.send(ctx.author.mention + " has rejoined the game!")
-                #Find the players before and after in the turn order who are still playing
-                i = index
-                while stillPlaying[i-1] == 0:
-                    i -= 1
-                    if i == -1:
-                        i = len(players) -1
-                before = players[i-1].display_name
-                i = index
-                while stillPlaying[i+1] == 0:
-                    i += 1
-                    if i == len(players)-1:
-                        i = -1
-                after = players[i+1].display_name
-                await generalChannel.send("You are player #" + str(index+1) + ' in the turn order, between ' + before + ' & ' + after)
-            return
-        except:
-            pass
-        #New Player
-        await generalChannel.send(ctx.author.mention + " has joined the game!")
-        await ctx.author.add_roles(playerRole)
-        if len(players) == 0:
-            newPlayer(0, ctx.author)
-            return
-        #Pick a random place to insert the player into
-        placement = random.randint(0,len(players)-1)
-        if placement == 0 and random.randint(0,1) == 0:
-            #The first and last position are equivalent, so there is a 50% chance of each
-            placement == len(players)
-        newPlayer(placement, ctx.author)
-        #Find the players before and after who are still part of the game
-        i = placement
-        while stillPlaying[i-1] == 0:
-            i -= 1
-            if i == -1:
-                i = len(players) -1
-        before = players[i-1].display_name
-        i = placement
+    if ctx.channel != botChannel:
+        return
+    player = get(players, discord=ctx.author)
+    if player is not None:
+        #When the author is/was part of the game
+        index = players.index(get(players, discord=ctx.author))
+        if player.stillPlaying:
+            await botChannel.send("You are already a player")
+        else:
+            player.stillPlaying = True
+            await botChannel.send("{} has rejoined the game!".format(player.discord.mention))
+            #Find the players before and after in the turn order who are still playing
+            i = index
+            while not players[i-1].stillPlaying:
+                i -= 1
+                if i == -1:
+                    i = len(players) -1
+            before = players[i-1].discord.display_name
+            i = index
+            while not players[i+1].stillPlaying:
+                i += 1
+                if i == len(players)-1:
+                    i = -1
+            after = players[i+1].discord.display_name
+            await ctx.author.add_roles(playerRole)
+            await botChannel.send("You are player #{} in the turn order, between {} & {}".format(index+1, before, after))
+        return
+    #New Player
+    await botChannel.send("{} has joined the game!".format(ctx.author.mention))
+    await ctx.author.add_roles(playerRole)
+    newPlayerObj = Player(ctx.author, game.globalTurn)
+    if len(players) == 0:
+        newPlayer(0, newPlayerObj)
+        await saveData()
+        return
+    #Pick a random place to insert the player into
+    placement = rnd.randint(0,len(players)-1)
+    if placement == 0 and rnd.randint(0,1) == 0:
+        #The first and last position are equivalent, so there is a 50% chance of each
+        placement = len(players)
+    newPlayer(placement, newPlayerObj)
+    #Find the players before and after who are still part of the game
+    i = placement
+    while not players[i-1].stillPlaying:
+        i -= 1
+        if i == -1:
+            i = len(players) -1
+    before = players[i-1].discord.display_name
+    i = placement
+    if i == len(players)-1:
+        i = -1
+    while not players[i+1].stillPlaying:
+        i += 1
         if i == len(players)-1:
             i = -1
-        while stillPlaying[i+1] == 0:
-            i += 1
-            if i == len(players)-1:
-                i = -1
-        after = players[placement+1].display_name
-        if len(players) > 1:
-            await generalChannel.send("You are player #" + str(placement+1) + ' in the turn order, between ' + before + ' & ' + after)
+    after = players[i+1].discord.display_name
+    if len(players) > 2:
+        await botChannel.send("You are player #{} in the turn order, between {} & {}".format(placement+1, before, after))
+    await saveData()
 
 def newPlayer(index, player):
-    global players, stillPlaying, voteHistory, stats, turn
+    global players, game
     #If the new player is before the current player, increment turn unless the game hasn't started yet
-    if index <= turn and not (globalTurn == 0 and state == 0):
-        turn += 1
-    #Update lists
+    if index <= game.turn and not (game.globalTurn == 0 and game.state == 0):
+        game.turn += 1
     if index == len(players):
-        #When the player is placed at the end of the list
         players = players + [player]
-        stillPlaying = stillPlaying + [1]
-        for i in range(len(voteHistory)):
-            voteHistory[i] = voteHistory[i] + [-2]
-        for i in range(len(stats)):
-            stats[i] = stats[i] + [0]
-        if state == 2:
-            votes = votes + [-2]
-        online = online + [0]
+    else:
+        players = players[:index] + [player] + players[index:]
+
+
+@bot.command()
+async def ready(ctx):
+    global game
+    if not (ctx.channel == botChannel and game.state == 0 and get(nomicServer.roles,name='Historian') in ctx.author.roles):
         return
-    #Update lists
-    players = players[:index] + [player] + players[index:]
-    stillPlaying = stillPlaying[:index] + [1] + stillPlaying[index:]
-    for i in range(len(voteHistory)):
-        voteHistory[i] = voteHistory[:index] + [-2] + voteHistory[index:]
-    for i in range(len(stats)):
-        stats[i] = stats[i][:index] + [0] + stats[i][index:]
-    if state == 2:
-        votes = votes[:index] + [-2] + votes[index:]
-    online = online[:index] + [0] + online[index:]
-
-
-@bot.command(name='ready')
-async def startTurn(ctx):
-    global state
-    if ctx.channel == generalChannel and state == 0:
-        #Begin the proposal phase
-        state = 1
-        #Give roles
-        await votingChannel.send(players[turn].mention + "'s turn has begun, make a proposal using !propose")
-        currentPlayerRole = get(nomicServer.roles, name='Current Player')
-        await players[turn].add_roles(currentPlayerRole)
-        newRole = await nomicServer.create_role(name='Game State : Proposing', colour=discord.Colour(0x992d22), hoist=True)
-        await botMember.add_roles(newRole)
-        oldRole = get(nomicServer.roles, name='Game State : Waiting')
-        await oldRole.delete()
-        #Begin timer for proposing
-        global proposalTask
-        proposalTask = asyncio.create_task(proposalTimeLimit())
+    #Begin the proposal phase
+    game.state = 1
+    #Give roles
+    await updateChannel.send("{}'s turn has begun, make a proposal using ~propose".format(players[game.turn].discord.mention))
+    currentPlayerRole = get(nomicServer.roles, name='Current Player')
+    await players[game.turn].discord.add_roles(currentPlayerRole)
+    newRole = await nomicServer.create_role(name='Game State: Proposing', colour=discord.Colour(0x992d22), hoist=True)
+    await botMember.add_roles(newRole)
+    oldRole = get(nomicServer.roles, name='Game State: Waiting')
+    await oldRole.delete()
+    #Begin timer for proposing
+    global proposalTask
+    proposalTask = asyncio.create_task(proposalTimeLimit())
 
 async def proposalTimeLimit():
-    await asyncio.sleep(proposalTime -3600)
-    await votingChannel.send(players[turn].mention + ", you have one hour left to propose")
+    await asyncio.sleep(game.proposalTime -3600)
+    await votingChannel.send("{}, you have one hour left to propose".format(players[game.turn].discord.mention))
     await asyncio.sleep(3600)
-    await votingChannel.send("A proposal was not made in time, starting next turn")
-    await endTurn(0)
+    await updateChannel.send("A proposal was not made in time, waiting for the next turn")
+    await endTurn(0, 3)
 
 
-@bot.command(name='propose')
-async def startVote(ctx):
-    global state, yesses, nos, votes
-    if ctx.channel == votingChannel and state == 1:
-        #Reset variables for voting
-        yesses = 0
-        nos = 0
-        votes = [0] * len(players)
-        for i in range(len(players)):
-            if stillPlaying[i] == 0:
-                votes[i] = -2
-        #End timer
-        global proposalTask
-        proposalTask.cancel()
-        #Begin voting phase
-        state = 2
-        await votingChannel.send(playerRole.mention + " " + ctx.author.display_name + "'s proposal is available to vote on")
-        #Give roles
-        for i in range(len(players)):
-            if stillPlaying[i] == 1:
-                toVoteRole = get(nomicServer.roles, name='To Vote')
-                await players[i].add_roles(toVoteRole)
-        newRole = await nomicServer.create_role(name='Game State : Voting', colour=discord.Colour(0x992d22), hoist=True)
-        await botMember.add_roles(newRole)
-        oldRole = get(nomicServer.roles, name='Game State : Proposing')
-        await oldRole.delete()
-        stats[3][turn] += 1
-        #Begin voting timer
-        global voteTask
-        voteTask = asyncio.create_task(votingTimeLimit())
+@bot.command()
+async def propose(ctx):
+    global players, game
+    if not (ctx.channel == votingChannel and game.state == 1 and ctx.author == players[game.turn].discord):
+        return
+    #FirstVote is whether or not the first vote has been made yet, lastVote is the index of the most recent vote
+    game.firstVote = False
+    game.lastVote = None
+    toVoteRole = get(nomicServer.roles, name='To Vote')
+    for player in players:
+        if player.stillPlaying:
+            player.currentVote = 0
+            await player.discord.add_roles(toVoteRole)
+        else:
+            player.currentVote = -2
+    players[game.turn].stats['proposals'] += 1
+    #End timer
+    global proposalTask
+    proposalTask.cancel()
+    #Begin voting phase
+    game.state = 2
+    text = "'s proposal is available to vote on!\nVote with ~yes or ~no"
+    await votingChannel.send("{} {}{}".format(playerRole.mention, ctx.author.display_name, text))
+    #Give roles
+    newRole = await nomicServer.create_role(name='Game State: Voting', colour=discord.Colour(0x992d22), hoist=True)
+    await botMember.add_roles(newRole)
+    oldRole = get(nomicServer.roles, name='Game State: Proposing')
+    await oldRole.delete()
+    #Begin voting timer
+    global voteTask
+    voteTask = asyncio.create_task(votingTimeLimit())
 
 async def votingTimeLimit():
-    await asyncio.sleep(votingTime -3600)
+    global game
+    await asyncio.sleep(game.votingTime -3600)
     toVoteRole = get(nomicServer.roles, name='To Vote')
-    await votingChannel.send(toVoteRole.mention + ", you have one hour left to vote")
+    await votingChannel.send("{}, you have one hour left to vote".format(toVoteRole.mention))
     await asyncio.sleep(3600)
     await votingChannel.send("Voting time is up")
+    game.lastVote = None
     await checkVotes(1)
 
 
-@bot.command(name='yes')
-async def voteYes(ctx):
-    global yesses, votes
-    if ctx.channel == votingChannel and state == 2:
-        i = players.index(ctx.author)
-        if votes[i] == 0:
-            votes[i] = 1
-            yesses += 1
-            await votingChannel.send(ctx.author.display_name + " has voted!")
-            toVoteRole = get(nomicServer.roles, name='To Vote')
-            await ctx.author.remove_roles(toVoteRole)
-        else:
-            await votingChannel.send("You've already voted")
-        await checkVotes(0)
+@bot.command()
+async def yes(ctx):
+    global players, game
+    if not (ctx.channel == votingChannel and game.state == 2 and ctx.author in [x.discord for x in players]):
+        return
+    player = get(players, discord = ctx.author)
+    if player.currentVote == 0:
+        player.currentVote = 1
+        await votingChannel.send("{} has voted!".format(ctx.author.display_name))
+        toVoteRole = get(nomicServer.roles, name='To Vote')
+        await ctx.author.remove_roles(toVoteRole)
+    elif player.currentVote != -2:
+        await votingChannel.send("You've already voted")
+    if players.index(player) != game.turn:
+        if not game.firstVote:
+            game.firstVote = True
+            player.stats['firstVotes'] += 1
+        game.lastVote = player
+    await checkVotes(0)
 
-@bot.command(name='no')
-async def voteNo(ctx):
-    global nos, votes
-    if ctx.channel == votingChannel and state == 2:
-        i = players.index(ctx.author)
-        if votes[i] == 0:
-            votes[i] = 2
-            nos += 1
-            await votingChannel.send(ctx.author.display_name + " has voted!")
-            toVoteRole = get(nomicServer.roles, name='To Vote')
-            await ctx.author.remove_roles(toVoteRole)
-        else:
-            await votingChannel.send("You've already voted")
-        await checkVotes(0)
+@bot.command()
+async def no(ctx):
+    global players, game
+    if not (ctx.channel == votingChannel and game.state == 2 and ctx.author in [x.discord for x in players]):
+        return
+    player = get(players, discord=ctx.author)
+    if player.currentVote == 0:
+        player.currentVote = 2
+        await votingChannel.send("{} has voted!".format(ctx.author.display_name))
+        toVoteRole = get(nomicServer.roles, name='To Vote')
+        await ctx.author.remove_roles(toVoteRole)
+    elif player.currentVote != -2:
+        await votingChannel.send("You've already voted")
+    if players.index(player) != game.turn:
+        if not game.firstVote:
+            game.firstVote = True
+            player.stats['firstVotes'] += 1
+        game.lastVote = player
+    await checkVotes(0)
 
 async def checkVotes(timeUp):
-    global state, turn
+    global game
     allVotes = True
-    for i in range(len(votes)):
-        if votes[i] == 0 and stillPlaying[i] == 1:
+    yesses = 0
+    nos = 0
+    for player in players:
+        if player.currentVote == 0 and player.stillPlaying:
             allVotes = False
+        elif player.currentVote == 1: yesses += 1
+        elif player.currentVote == 2: nos += 1
     #All votes have been cast
     if allVotes:
-        if yesses/(yesses+nos) >= yesProportion:
-            await generalChannel.send("All votes have been cast and the proposal has passed. Waiting for the next turn to start")
-            success = 1
+        if yesses/(yesses+nos) >= game.yesProportion - 0.001:
+            await updateChannel.send("All votes have been cast and the proposal has passed. Waiting for the next turn to start")
+            await endTurn(1, 0)
         else:
-            await generalChannel.send("All votes have been cast and the proposal has failed. Waiting for the next turn to start")
-            success = 0
-        await endTurn(success)
+            await updateChannel.send("All votes have been cast and the proposal has failed. Waiting for the next turn to start")
+            await endTurn(0, 0)
         return
     #Time is up
     if timeUp:
         if yesses + nos == 0:
-            await generalChannel.send("The proposal has failed as no votes were cast, waiting for the next turn to start")
-            success = 0
-        elif yesses/(yesses+nos) >= yesProportion:
-            await generalChannel.send("Voting time is up, and the proposal has passed. Waiting for the next turn to start")
-            success = 1
+            await updateChannel.send("The proposal has failed as no votes were cast, waiting for the next turn to start")
+            await endTurn(0, 2)
+        elif yesses/(yesses+nos) >= game.yesProportion - 0.001:
+            await updateChannel.send("Voting time is up, and the proposal has passed. Waiting for the next turn to start")
+            await endTurn(1, 2)
         else:
-            await generalChannel.send("Voting time is up, and the proposal has failed. Waiting for the next turn to start")
-            success = 0
-        await endTurn(success)
+            await updateChannel.send("Voting time is up, and the proposal has failed. Waiting for the next turn to start")
+            await endTurn(0, 2)
         return
     #Enough votes to determine a conclusion
-    if yesses/sum(stillPlaying) >= yesProportion:
-        generalChannel.send("There are enough yes votes for the proposal to pass. Waiting for the next turn to start")
-        await endTurn(1)
-    if nos/sum(stillPlaying) > (1-yesProportion):
-        generalChannel.send("There are enough no votes for the proposal to fail. Waiting for the next turn to start")
-        await endTurn(0)
+    if yesses/sum([x.stillPlaying for x in players]) >= game.yesProportion - 0.001:
+        await updateChannel.send("There are enough yes votes for the proposal to pass. Waiting for the next turn to start")
+        await endTurn(1, 1)
+    if nos/sum([x.stillPlaying for x in players]) > (1-game.yesProportion) + 0.001:
+        await updateChannel.send("There are enough no votes for the proposal to fail. Waiting for the next turn to start")
+        await endTurn(0, 1)
 
 
-async def endTurn(success):
-    global state, turn, globalTurn, voteHistory
+async def endTurn(success, endCondition):
+    global players, game
+    #Points
+    if success:
+        pointAdd = 0
+        for player in players:
+            if player.currentVote == 1:
+                pointAdd += 2
+            elif player.currentVote == 2:
+                player.points += 5
+        players[turn].points += pointAdd
+        await updateChannel.send('Point changes:')
+        await updateChannel.send('+' + pointAdd + ': ' + players[turn].discord.display_name)
+        ioptns = '+5: '
+        for player in players:
+            if player.currentVote == 2:
+                ioptns += player.discord.display_name + ' '
+        if len(ioptns) >= 5:
+            await updateChannel.send(ioptns)
+
+    elif endCondition != 3:
+        players[turn].points -= 10
+        await updateChannel.send('Point changes:')
+        await updateChannel.send('-10: ' + players[turn].discord.display_name)
     #Remove roles
     currentPlayerRole = get(nomicServer.roles, name='Current Player')
-    await players[turn].remove_roles(currentPlayerRole)
-    i = 0
+    toVoteRole = get(nomicServer.roles, name='To Vote')
+    await players[game.turn].discord.remove_roles(currentPlayerRole)
     for player in players:
-        if stillPlaying[i] == 1:
-            toVoteRole = get(nomicServer.roles, name='To Vote')
-            await player.remove_roles(toVoteRole)
-        i += 1
+        if player.stillPlaying:
+            await player.discord.remove_roles(toVoteRole)
     for role in nomicServer.roles:
-        if role.name.startswith('Game State :'):
+        if role.name.startswith('Game State:'):
             await role.delete()
-    newRole = await nomicServer.create_role(name='Game State : Waiting', colour=discord.Colour(0x992d22), hoist=True)
+    newRole = await nomicServer.create_role(name='Game State: Waiting', colour=discord.Colour(0x992d22), hoist=True)
     await botMember.add_roles(newRole)
+    if game.lastVote is not None:
+        players[game.lastVote].stats['lastVotes'] += 1
     #Begin waiting phase
-    voteHistory.append(votes + [str(players[turn].id), players[turn].display_name, success, globalTurn])
-    state = 0
-    turn += 1
-    globalTurn += 1
-    if turn >= len(players):
-        turn = 0
-    while stillPlaying[turn] == 0:
-        turn += 1
-        if turn > len(players):
-            turn = 0
+    turn = Turn(game.globalTurn)
+    turn.proponent = players[game.turn]
+    turn.passed = success
+    turn.end = endCondition
+    for player in players:
+        player.voteHistory.append(player.currentVote)
+        player.currentVote = None
+    game.state = 0
+    game.turn += 1
+    game.globalTurn += 1
+    if game.turn >= len(players):
+        game.turn = 0
+    while not players[game.turn].stillPlaying:
+        game.turn += 1
+        if game.turn > len(players):
+            game.turn = 0
+    game.firstVote = False
+    game.lastVote = None
+    turns.append(turn)
     await saveData()
 
 
 async def saveData():
     ws3['B1'] = len(players)
-    ws3['B3'] = turn
-    ws3['B4'] = globalTurn
-    ws3['B5'] = state
-    for i in range(len(players)):
-        if stillPlaying[i] == 1:
-            ws1.cell(1, i+2, players[i].display_name)
-            ws2.cell(1, i+2, players[i].display_name)
-            ws1.cell(2, i+2, players[i].name)
-            ws1.cell(3, i+2, str(players[i].id))
-        ws1.cell(5, i+2, stillPlaying[i])
-        if votes == []:
-            ws3.cell(8, i+2, None)
-            ws3['B9'] = 1
-        else:
-            ws3.cell(8, i+2, votes[i])
-            ws3['B9'] = 0
-        ws3.cell(7, i+2, online[i])
+    ws3['B3'] = game.turn
+    ws3['B4'] = game.globalTurn
+    ws3['B5'] = game.state
+    for player in players:
+        i = players.index(player)
+        if player.discord in nomicServer.members:
+            ws1.cell(1, i+2, player.discord.display_name)
+            ws2.cell(1, i+6, player.discord.display_name)
+            ws1.cell(2, i+2, player.discord.name)
+            ws1.cell(3, i+2, str(player.discord.id))
+        ws1.cell(5, i+2, player.stillPlaying)
+        ws1.cell(6, i+2, player.points)
+        ws1.cell(7, i+2, player.currentVote)
+        ws1.cell(8, i+2, player.online)
+    ws3['B7'] = game.firstVote
+    if game.lastVote is not None:
+        ws3['B8'] = game.lastVote.discord.id
+    else: ws3['B8'] = None
 
-    for i in range(globalTurn):
-        for j in range(len(players)+3):
-            ws2.cell(i+4, j+2, voteHistory[i][j])
-        ws2.cell(i+4, 1, i)
-    for i in range(ws3['B10'].value):
-        for j in range(len(players)):
-            ws1.cell(i+8, j+2, stats[i][j])
+    for i in range(game.globalTurn):
+        for player in players:
+            ws2.cell(i+3, players.index(player)+6, player.voteHistory[i])
+            ws3.cell(i+3, players.index(player)+9, player.points[i])
+        ws2.cell(i+3, 1, turns[i].turnNumber)
+        proponent = turns[i].proponent.discord
+        if not isinstance(proponent, str):
+            ws2.cell(i+3, 2, str(proponent.id))
+            ws2.cell(i+3, 3, proponent.display_name)
+        ws2.cell(i+3, 4, turns[i].passed)
+        ws2.cell(i+3, 5, turns[i].end)
+    for player in players:
+        i = 11 
+        for stat in player.stats.values():
+            ws1.cell(i, players.index(player)+2, stat)
+            i += 1
+
     wb.save('Nomic.xlsx')
     print("Saved")
 
 
-
-@bot.command(name='tz')
-async def timeZoneRole(ctx, tz):
+'''
+@bot.command()
+async def tz(ctx, tz):
     if not ((tz[0] == '+' or tz[0] == '-') and int(tz[1:]) <= 13 and tz != '-0' and ctx.channel == generalChannel):
         return
     newRole = get(nomicServer.roles, name = 'Time Zone ' + tz)
@@ -486,36 +557,44 @@ async def timeZoneRole(ctx, tz):
                 await ctx.author.add_roles(newRole)
             return
     await ctx.author.add_roles(newRole)
-
+'''
 
 
 @bot.event
 async def on_message(ctx):
-    index = players.index(ctx.author)
-    stats[0][index] += 1
+    if ctx.author in [x.discord for x in players]:
+        player = get(players, discord = ctx.author)
+        player.stats['messages'] += 1
+    await bot.process_commands(ctx)
 
 async def daily():
-    global online
-    tomorrow = dt.date.today() + dt.timedelta(days=1)
-    midnight = dt.datetime.combine(tomorrow, dt.time.min)
-    #Loops until midnight in whichever timezone the bot is run in
+    global players
+    #Loops once per day
     while True:
-        now = dt.datetime.now()
-        difference = (midnight-now).total_seconds()
-        for i in range(len(online)):
-            if stillPlaying[i] == 1 and online[i] == 0:
-                if players[i].status == "online":
-                    online[i] == 1
-        saveData()
-        if difference < 3600:
-            break
-        await asyncio.sleep(3600)
-    for i in range(len(players)):
-        if stillPlaying[i] == 1:
-            stats[1][i] += 1
-        if online[i] == 1:
-            stats[2][i] += 1
-    #Wait an hour in case of daylight savings
-    await asyncio.sleep(difference + 3610)
+        tomorrow = dt.date.today() + dt.timedelta(days=1)
+        midnight = dt.datetime.combine(tomorrow, dt.time.min)
+        #Loops once per 15 minutes
+        while True:
+            now = dt.datetime.now()
+            difference = (midnight-now).total_seconds()
+            for player in players:
+                if player.stillPlaying and not player.online:
+                    if player.discord.status == "online":
+                        player.online = True
+            if difference < 900:
+                break
+            await asyncio.sleep(900)
+            await saveData()
+        for player in players:
+            if player.stillPlaying:
+                player.stats['daysPlaying'] += 1
+            if player.online:
+                player.stats['daysOnline'] += 1
+        await asyncio.sleep(difference + 60)
+        await saveData()
+
+
+players = []
+bot.loop.create_task(daily())
 
 bot.run(token)
