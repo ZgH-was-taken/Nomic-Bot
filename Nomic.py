@@ -9,8 +9,7 @@ import datetime as dt
 #token.txt is a file not uploaded to git, containing the bot token and server name
 with open("token.txt", 'r') as f:
     token = f.readline()[:-1]
-    botID = f.readline()[:-1]
-    serverName = f.readline()
+    botID = f.readline()
 
 client = discord.Client()
 bot = commands.Bot(command_prefix='~', case_insensitive = True)
@@ -52,7 +51,7 @@ class Player(object):
             self.currentVote = None
         else:
             self.currentVote = -2
-        self.voteHistory = [-2] * globalTurn
+        self.voteHistory = [-2] * (globalTurn)
         self.online = True
         statNames = ['messages','daysPlaying','daysOnline','proposals','firstVotes','lastVotes']
         self.stats = {i : 0 for i in statNames}
@@ -119,19 +118,18 @@ def loadData():
         if nextPlayer.discord is None:
             nextPlayer.discord = ws1.cell(1, i+2).value
         nextPlayer.stillPlaying = ws1.cell(5, i+2).value
-        nextPlayer.stillPlaying = ws1.cell(6, i+2).value
+        nextPlayer.points = ws1.cell(6, i+2).value
         nextPlayer.currentVote = ws1.cell(7, i+2).value
         nextPlayer.online = ws1.cell(8, i+2).value
-        for j in range(game.globalTurn):
+        for j in range(game.globalTurn -1):
             nextPlayer.voteHistory[j] = ws2.cell(j+3, i+6).value
-            nextPlayer.points[j] = ws3.cell(j+3,i+9).value
         j = 11
         for k in nextPlayer.stats:
             nextPlayer.stats[k] = ws1.cell(j, i+2).value
             j += 1
         players.append(nextPlayer)
 
-    for i in range(game.globalTurn):
+    for i in range(game.globalTurn -1):
         nextTurn = Turn(i)
         nextTurn.proponent = get(nomicServer.members, id=int(ws2.cell(i+3, 2).value))
         if nextTurn.proponent is None:
@@ -141,11 +139,12 @@ def loadData():
         turns.append(nextTurn)
 
 
-setup = False
 @bot.event
 async def on_ready():
-    if setup:
-        return
+    try:
+        if setup: return
+    except:
+        pass
     setup = True
     global nomicServer, botMember, botChannel, updateChannel, votingChannel, playerRole
     #Commonly used channels and roles
@@ -238,7 +237,7 @@ async def join(ctx):
     #New Player
     await botChannel.send("{} has joined the game!".format(ctx.author.mention))
     await ctx.author.add_roles(playerRole)
-    newPlayerObj = Player(ctx.author, game.globalTurn)
+    newPlayerObj = Player(ctx.author, game.globalTurn-1)
     if len(players) == 0:
         newPlayer(0, newPlayerObj)
         await saveData()
@@ -271,7 +270,7 @@ async def join(ctx):
 def newPlayer(index, player):
     global players, game
     #If the new player is before the current player, increment turn unless the game hasn't started yet
-    if index <= game.turn and not (game.globalTurn == 0 and game.state == 0):
+    if index <= game.turn and not (game.globalTurn == 1 and game.state == 0):
         game.turn += 1
     if index == len(players):
         players = players + [player]
@@ -284,6 +283,14 @@ async def ready(ctx):
     global game
     if not (ctx.channel == botChannel and game.state == 0 and get(nomicServer.roles,name='Historian') in ctx.author.roles):
         return
+    game.turn += 1
+    game.globalTurn += 1
+    if game.turn >= len(players):
+        game.turn = 0
+    while not players[game.turn].stillPlaying:
+        game.turn += 1
+        if game.turn > len(players):
+            game.turn = 0
     #Begin the proposal phase
     game.state = 1
     #Give roles
@@ -439,9 +446,9 @@ async def endTurn(success, endCondition):
                 pointAdd += 2
             elif player.currentVote == 2:
                 player.points += 5
-        players[turn].points += pointAdd
+        players[game.turn].points += pointAdd
         await updateChannel.send('Point changes:')
-        await updateChannel.send('+' + pointAdd + ': ' + players[turn].discord.display_name)
+        await updateChannel.send('+' + pointAdd + ': ' + players[game.turn].discord.display_name)
         ioptns = '+5: '
         for player in players:
             if player.currentVote == 2:
@@ -450,9 +457,9 @@ async def endTurn(success, endCondition):
             await updateChannel.send(ioptns)
 
     elif endCondition != 3:
-        players[turn].points -= 10
+        players[game.turn].points -= 10
         await updateChannel.send('Point changes:')
-        await updateChannel.send('-10: ' + players[turn].discord.display_name)
+        await updateChannel.send('-10: ' + players[game.turn].discord.display_name)
     #Remove roles
     currentPlayerRole = get(nomicServer.roles, name='Current Player')
     toVoteRole = get(nomicServer.roles, name='To Vote')
@@ -476,14 +483,6 @@ async def endTurn(success, endCondition):
         player.voteHistory.append(player.currentVote)
         player.currentVote = None
     game.state = 0
-    game.turn += 1
-    game.globalTurn += 1
-    if game.turn >= len(players):
-        game.turn = 0
-    while not players[game.turn].stillPlaying:
-        game.turn += 1
-        if game.turn > len(players):
-            game.turn = 0
     game.firstVote = False
     game.lastVote = None
     turns.append(turn)
@@ -514,7 +513,6 @@ async def saveData():
     for i in range(game.globalTurn):
         for player in players:
             ws2.cell(i+3, players.index(player)+6, player.voteHistory[i])
-            ws3.cell(i+3, players.index(player)+9, player.points[i])
         ws2.cell(i+3, 1, turns[i].turnNumber)
         proponent = turns[i].proponent.discord
         if not isinstance(proponent, str):
