@@ -7,7 +7,7 @@ import asyncio
 import datetime as dt
 import math
 
-#token.txt is a file not uploaded to git, containing the bot token and server name
+#token.txt is a file not uploaded to git, containing the bot token
 with open("token.txt", 'r') as f:
     token = f.readline()[:-1]
     botID = f.readline()
@@ -42,6 +42,7 @@ turn.end
 1 : Sufficient votes
 2 : Out of voting time
 3 : Out of proposal time
+4 : Passed
 '''
 
 
@@ -49,6 +50,7 @@ players = []
 class Player(object):
     def __init__(self, discObj, globalTurn):
         self.discord = discObj
+        self.name = None
         self.points = 0
         self.active = True
         self.lastMessage = None
@@ -61,10 +63,7 @@ class Player(object):
         statNames = ['messages','daysPlaying','daysOnline','proposals','firstVotes','lastVotes']
         self.stats = {i : 0 for i in statNames}
     def __repr__(self):
-        try:
-            return self.discord.display_name
-        except:
-            return self.discord
+        return self.name
 
 
 turns = []
@@ -75,10 +74,7 @@ class Turn(object):
         self.passed = None
         self.end = None
     def __repr__(self):
-        try:
-            return str(self.turnNumber) + ': ' + str(self.proponent.display_name)
-        except:
-            return str(self.turnNumber) + ': ' + str(self.proponent)
+        return str(self.turnNumber) + ': ' + str(self.proponent.name)
 
 
 game = None
@@ -95,6 +91,7 @@ class Parameters(object):
         self.timerEnd = None
         self.firstVote = None
         self.lastVote = None
+        self.ready = None
     def __repr__(self):
         return 'Turn:' + str(self.globalTurn) + '  State:' + str(self.state)
 
@@ -128,7 +125,8 @@ def loadData():
     game.timeoutMinimum = [float(i) for i in ws3['B15'].value.split(',')]
     game.transmute = ws3['B16'].value
     game.timerEnd = ws3['B17'].value
-    summaryMsgID = ws3['B19'].value
+    game.ready = ws3['B18'].value
+    summaryMsgID = ws3['B20'].value
     if summaryMsgID:
         summaryMsgID = int(summaryMsgID)
 
@@ -137,6 +135,7 @@ def loadData():
         nextPlayer = Player(nextPlayer, game.globalTurn)
         if nextPlayer.discord is None:
             nextPlayer.discord = ws1.cell(1, i+2).value
+        nextPlayer.name = ws1.cell(1, i+2).value
         nextPlayer.active = ws1.cell(5, i+2).value
         nextPlayer.lastMessage = ws1.cell(6, i+2).value
         nextPlayer.points = ws1.cell(7, i+2).value
@@ -151,12 +150,15 @@ def loadData():
             nextPlayer.currentVote[1] = int(nextPlayer.currentVote[1])
         nextPlayer.online = ws1.cell(9, i+2).value
         for j in range(game.globalTurn):
-            if ws2.cell(j+3, i+6).value[-1] == ',':
+            if ws2.cell(j+3, i+6).value == None:
+                nextPlayer.voteHistory[j] = [None, None]
+            elif ws2.cell(j+3, i+6).value[-1] == ',':
                 nextPlayer.voteHistory[j] = [ws2.cell(j+3,i+6).value[:-1],None]
+                nextPlayer.voteHistory[j][0] = int(nextPlayer.voteHistory[j][0])
             else:
                 nextPlayer.voteHistory[j] = ws2.cell(j+3, i+6).value.split(',')
                 nextPlayer.voteHistory[j][1] = int(nextPlayer.voteHistory[j][1])
-            nextPlayer.voteHistory[j][0] = int(nextPlayer.voteHistory[j][0])
+                nextPlayer.voteHistory[j][0] = int(nextPlayer.voteHistory[j][0])
         j = 12
         for k in nextPlayer.stats:
             nextPlayer.stats[k] = ws1.cell(j, i+2).value
@@ -165,7 +167,7 @@ def loadData():
 
     for i in range(game.globalTurn):
         nextTurn = Turn(i)
-        nextTurn.proponent = get(nomicServer.members, id=int(ws2.cell(i+3, 2).value))
+        nextTurn.proponent = get(players, discord__id=int(ws2.cell(i+3, 2).value))
         if nextTurn.proponent is None:
             nextTurn.proponent = ws2.cell(i+3, 3).value
         nextTurn.passed = ws2.cell(i+3, 4).value
@@ -187,12 +189,13 @@ async def on_ready():
     except:
         pass
     setup = True
-    global nomicServer, botMember, botChannel, updateChannel, votingChannel, playerRole
+    global nomicServer, botMember, botChannel, histBotChannel, updateChannel, votingChannel, playerRole
     #Commonly used channels and roles
     nomicServer = get(bot.guilds, name='Nomic')
     botMember = get(nomicServer.members, id=int(botID))
 
     botChannel = get(nomicServer.channels, name='bot-commands')
+    histBotChannel = get(nomicServer.channels, name='historian-bot')
     updateChannel = get(nomicServer.channels, name='game-updates')
     votingChannel = get(nomicServer.channels, name='voting')
 
@@ -205,45 +208,22 @@ async def on_ready():
     roleNames = ['Game State: Waiting', 'Game State: Proposing', 'Game State: Voting']
     await botMember.add_roles(get(nomicServer.roles, name=roleNames[game.state]))
 
+    #if game.state == 2:
+    #    await checkVotes(0)
+
     print("Bot is ready")
 
 
-helpText = """```
-~help
-Displays this message
-
-~join
-Gives a non-player the player role and adds them into the turn order in a random position
-Called by non-players in #bot-commands at any time
-
-~ready
-Causes the game to move from a state of waiting to the start of the next turn
-Called by historians in #bot-commands during the waiting phase
-
-~propose
-Begins the voting process once the current player has made a proposal
-Called by the current player in #voting during the proposal phase
-
-~transmute
-Toggles whether or not the current proposal involves transmutation
-Called by the current player in #voting during the voting phase
-
-~yes/no
-Votes for or against the current proposal
-Called by players in #voting during the voting phase
-```"""
-
-@bot.command()
-async def help(ctx):
-    await ctx.author.send(helpText)
 
 @bot.command()
 async def save(ctx):
+    if not ctx.channel == histBotChannel: return
     await saveData()
 
 @bot.command()
 async def data(ctx):
-    await saveData()
+    if not ctx.channel == botChannel: return
+    await saveData()    
     await botChannel.send(file=discord.File('nomic.xlsx'))
 
 
@@ -281,7 +261,7 @@ async def join(ctx):
         i -= 1
         if i == -1:
             i = len(players) -1
-    before = players[i-1].discord.display_name
+    before = players[i-1].name
     i = placement
     if i == len(players)-1:
         i = -1
@@ -289,7 +269,7 @@ async def join(ctx):
         i += 1
         if i == len(players)-1:
             i = -1
-    after = players[i+1].discord.display_name
+    after = players[i+1].name
     if len(players) > 2:
         await botChannel.send("You are player #{} in the turn order, between {} & {}".format(placement+1, before, after))
     await saveData()
@@ -311,19 +291,54 @@ async def ready(ctx):
     global game
     if not (ctx.channel == botChannel and game.state == 0 and get(nomicServer.roles,name='Historian') in ctx.author.roles):
         return
+    game.ready = True
+    await start()
+    await saveData()
+
+@bot.command()
+async def pause(ctx):
+    if not (ctx.channel == botChannel and get(nomicServer.roles,name='Historian') in ctx.author.roles):
+        return
+    if game.state == 1:
+        global proposalTask
+        proposalTask.cancel()
+        game.state == 0
+        await botMember.add_roles(get(nomicServer.roles, name='Game State: Waiting'))
+        await botMember.remove_roles(get(nomicServer.roles, name='Game State: Proposing'))
+        await players[game.turn].discord.add_roles(get(nomicServer.roles, name='Next Player'))
+        await players[game.turn].discord.remove_roles(get(nomicServer.roles, name='Current Player'))
+        nextTurn = game.turn + 1
+        if nextTurn >= len(players):
+            nextTurn = 0
+        while not players[nextTurn].active:
+            nextTurn += 1
+            if nextTurn > len(players):
+                nextTurn = 0
+        await players[nextTurn].discord.remove_roles(get(nomicServer.roles, name='Next Player'))
+    elif game.state == 2:
+        game.ready = False
+
+async def start():
     #Begin the proposal phase
     game.state = 1
     #Give roles
     await updateChannel.send("Turn #{}! {}'s turn has begun, make a proposal using ~propose".format(game.globalTurn+1, players[game.turn].discord.mention))
     await players[game.turn].discord.add_roles(get(nomicServer.roles, name='Current Player'))
     await players[game.turn].discord.remove_roles(get(nomicServer.roles, name='Next Player'))
+    nextTurn = game.turn + 1
+    if nextTurn >= len(players):
+        nextTurn = 0
+    while not players[nextTurn].active:
+        nextTurn += 1
+        if nextTurn > len(players):
+            nextTurn = 0
+    await players[nextTurn].discord.add_roles(get(nomicServer.roles, name='Next Player'))
     await botMember.add_roles(get(nomicServer.roles, name='Game State: Proposing'))
     await botMember.remove_roles(get(nomicServer.roles, name='Game State: Waiting'))
     #Begin timer for proposing
     game.timerEnd = dt.datetime.now() + dt.timedelta(seconds = game.proposalTime)
     global proposalTask
     proposalTask = asyncio.create_task(proposalTimeLimit())
-    await saveData()
 
 
 
@@ -370,6 +385,15 @@ async def timeout(ctx):
         await checkVotes(1)
 
 
+@bot.command(name='pass')
+async def passTurn(ctx):
+    if not(ctx.author == players[game.turn].discord and ctx.channel == botChannel and game.state == 1): return
+    await updateChannel.send('The current turn has been passed, waiting for the next turn to start')
+    global proposalTask
+    proposalTask.cancel()
+    await endTurn(0,4)
+
+
 
 @bot.command()
 async def propose(ctx):
@@ -377,6 +401,7 @@ async def propose(ctx):
     game.transmute = 0
     if not (ctx.channel == votingChannel and game.state == 1 and ctx.author == players[game.turn].discord):
         return
+    game.state = 2
     #FirstVote is whether or not the first vote has been made yet, lastVote is the index of the most recent vote
     game.firstVote = False
     game.lastVote = None
@@ -393,10 +418,10 @@ async def propose(ctx):
     global proposalTask
     proposalTask.cancel()
     #Begin voting phase
-    game.state = 2
-    instant = math.ceil(sum([x.active for x in players])*game.yesProportion[game.transmute])
+    instPass = math.ceil(sum([x.active for x in players])*game.yesProportion[0])
+    instFail = math.ceil(sum([x.active for x in players])*(1-game.yesProportion[0])+.0001)
     txt = "{} {}'s proposal is available to vote on!\nVote with ~yes or ~no\n{} yes votes will instantly pass the proposal, {} are required to fail it"
-    txt = txt.format(playerRole.mention, ctx.author.display_name, instant, sum([x.active for x in players]) + 1 - instant)
+    txt = txt.format(playerRole.mention, players[game.turn].name, instPass, instFail)
     await votingChannel.send(txt)
     #Give roles
     await botMember.add_roles(get(nomicServer.roles, name='Game State: Voting'))
@@ -409,11 +434,58 @@ async def propose(ctx):
 
 @bot.command()
 async def transmute(ctx):
+    global players, game
+    game.transmute = 1
+    if not (ctx.channel == votingChannel and game.state == 1 and ctx.author == players[game.turn].discord):
+        return
+    game.state = 2
+    #FirstVote is whether or not the first vote has been made yet, lastVote is the index of the most recent vote
+    game.firstVote = False
+    game.lastVote = None
+    toVoteRole = get(nomicServer.roles, name='To Vote')
+    for player in players:
+        if player.active:
+            player.currentVote = [0,None]
+            await player.discord.add_roles(toVoteRole)
+        else:
+            player.currentVote = [-2,None]
+    game.voteNumber = 0
+    players[game.turn].stats['proposals'] += 1
+    #End timer
+    global proposalTask
+    proposalTask.cancel()
+    #Begin voting phase
+    instPass = math.ceil(sum([x.active for x in players])*game.yesProportion[1])
+    instFail = math.ceil(sum([x.active for x in players])*(1-game.yesProportion[1])+.0001)
+    txt = "{} {}'s proposal is available to vote on!\nVote with ~yes or ~no\n{} yes votes will instantly pass the proposal, {} are required to fail it"
+    txt = txt.format(playerRole.mention, players[game.turn].name, instPass, instFail)
+    await votingChannel.send(txt)
+    #Give roles
+    await botMember.add_roles(get(nomicServer.roles, name='Game State: Voting'))
+    await botMember.remove_roles(get(nomicServer.roles, name='Game State: Proposing'))
+    #Begin voting timer
+    global voteTask
+    game.timerEnd = dt.datetime.now() + dt.timedelta(seconds = game.votingTime)
+    voteTask = asyncio.create_task(votingTimeLimit())
+    await saveData()
+
+@bot.command()
+async def toggleTransmute(ctx):
     global game
     if not (ctx.channel == votingChannel and game.state == 2 and (ctx.author == players[game.turn].discord) or get(nomicServer.roles,name='Historian') in ctx.author.roles):
         return
-    await votingChannel.send('This proposal involves transmutation! Unanimity is required to pass')
-    game.transmute = 1
+    if game.transmute == 0:
+        instPass = math.ceil(sum([x.active for x in players])*game.yesProportion[1])
+        instFail = math.ceil(sum([x.active for x in players])*(game.yesProportion[1])+.0001)
+        txt = 'This proposal does not involve transmutation.\n{} yes votes will instantly pass the proposal, {} are required to fail it'
+        await votingChannel.send(txt.format(instPass,instFail))
+        game.transmute = 1
+    else:
+        instPass = math.ceil(sum([x.active for x in players])*game.yesProportion[0])
+        instFail = math.ceil(sum([x.active for x in players])*(game.yesProportion[0])+.0001)
+        txt = 'This proposal does not involve transmutation.\n{} yes votes will instantly pass the proposal, {} are required to fail it'
+        await votingChannel.send(txt.format(instPass,instFail))
+        game.transmute = 0
 
 
 
@@ -426,7 +498,8 @@ async def yes(ctx):
     if player.currentVote[0] == 0:
         player.currentVote = [1,game.voteNumber]
         game.voteNumber += 1
-        await votingChannel.send("{} has voted!".format(ctx.author.display_name))
+        player = get(players, discord=ctx.author)
+        await votingChannel.send("{} has voted!".format(player.name))
         toVoteRole = get(nomicServer.roles, name='To Vote')
         await ctx.author.remove_roles(toVoteRole)
     elif player.currentVote[0] != -2:
@@ -447,7 +520,8 @@ async def no(ctx):
     if player.currentVote[0] == 0:
         player.currentVote = [2,game.voteNumber]
         game.voteNumber += 1
-        await votingChannel.send("{} has voted!".format(ctx.author.display_name))
+        player = get(players, discord=ctx.author)
+        await votingChannel.send("{} has voted!".format(player.name))
         toVoteRole = get(nomicServer.roles, name='To Vote')
         await ctx.author.remove_roles(toVoteRole)
     elif player.currentVote[0] != -2:
@@ -525,35 +599,19 @@ async def endTurn(success, endCondition):
         if player.currentVote[0] == 1: yesses += 1
         elif player.currentVote[0] == 2: nos += 1
     summaryMsgID = None
-    if endCondition != 3:
+    if endCondition < 3:
         txt = 'Final Votes: {}/{}   ({}%/{}%)   out of {} players'.format(yesses, nos, round(yesses*100/(yesses+nos),2), round(nos*100/(yesses+nos),2), sum([x.active for x in players]))
         await updateChannel.send(txt)
         await votingChannel.send('Voting is now over')
-    if success:
-        pointAdd = 0
-        for player in players:
-            if player.currentVote[0] == 1:
-                pointAdd += 2
-            elif player.currentVote[0] == 2:
-                player.points += 5
-        players[game.turn].points += pointAdd
-        await updateChannel.send('Point changes:')
-        await updateChannel.send('+{}: {}'.format(pointAdd,players[game.turn].discord.display_name))
-        ioptns = '+5: '
-        for player in players:
-            if player.currentVote[0] == 2:
-                ioptns += player.discord.display_name + '   '
-        if len(ioptns) >= 5:
-            await updateChannel.send(ioptns)
-    elif endCondition != 3:
-        players[game.turn].points -= 10
-        await updateChannel.send('Point changes:')
-        await updateChannel.send('-10: ' + players[game.turn].discord.display_name)
 
-    if endCondition != 2 and endCondition != 3:
+    if not success and endCondition < 3:
+        players[game.turn].points -= 10
+        await updateChannel.send('Point Changes:\n-10: {}'.format(players[game.turn].name))
+
+    if endCondition < 2:
         global voteTask
         voteTask.cancel()
-    if endCondition == 3:
+    if endCondition > 2:
         global proposalTask
         proposalTask.cancel()
 
@@ -570,7 +628,7 @@ async def endTurn(success, endCondition):
 
     #Begin waiting phase
     turn = Turn(game.globalTurn)
-    turn.proponent = players[game.turn].discord
+    turn.proponent = players[game.turn]
     turn.passed = success
     turn.end = endCondition
     for player in players:
@@ -593,7 +651,8 @@ async def endTurn(success, endCondition):
         if game.turn > len(players):
             game.turn = 0
 
-    await players[game.turn].discord.add_roles(get(nomicServer.roles, name='Next Player'))
+    if game.ready:
+        await start()
     await saveData()
 
 
@@ -606,13 +665,12 @@ async def saveData():
     ws3['B9'] = game.voteNumber
     ws3['B16'] = game.transmute
     ws3['B17'] = game.timerEnd
-    if summaryMsgID: ws3['B19'] = str(summaryMsgID)
-    else: ws3['B19'] = None
+    ws3['B18'] = game.ready
+    if summaryMsgID: ws3['B20'] = str(summaryMsgID)
+    else: ws3['B20'] = None
     for player in players:
         i = players.index(player)
         if player.discord in nomicServer.members:
-            ws1.cell(1, i+2, player.discord.display_name)
-            ws2.cell(1, i+6, player.discord.display_name)
             ws1.cell(2, i+2, player.discord.name)
             ws1.cell(3, i+2, str(player.discord.id))
         ws1.cell(5, i+2, player.active)
@@ -632,6 +690,8 @@ async def saveData():
 
     for i in range(game.globalTurn):
         for player in players:
+            if player.voteHistory[i][0] is None:
+                ws2.cell(i+3, players.index(player)+6).value = None
             if player.voteHistory[i][1] is None and player.voteHistory[i][0] is not None:
                 ws2.cell(i+3, players.index(player)+6, str(player.voteHistory[i][0]) + ',')
             elif player.voteHistory[i][0] is not None:
@@ -639,8 +699,8 @@ async def saveData():
         ws2.cell(i+3, 1, turns[i].turnNumber)
         proponent = turns[i].proponent
         if not isinstance(proponent, str):
-            ws2.cell(i+3, 2, str(proponent.id))
-            ws2.cell(i+3, 3, proponent.display_name)
+            ws2.cell(i+3, 2, str(proponent.discord.id))
+            ws2.cell(i+3, 3, proponent.name)
         ws2.cell(i+3, 4, turns[i].passed)
         ws2.cell(i+3, 5, turns[i].end)
     for player in players:
@@ -658,12 +718,15 @@ async def saveData():
 async def on_message(ctx):
     if ctx.author in [x.discord for x in players]:
         player = get(players, discord = ctx.author)
+        if player is None:
+            return
         player.lastMessage = dt.datetime.now()
+    try:
+        player = get(players, discord = ctx.author)
         if ctx.content[0] != '~':
             player.stats['messages'] += 1
             if not player.online:
                 player.online = True
-    try:
         if ctx.content[:2] == '~#' and int(ctx.content[2:]):
             i = 1
             while ws4.cell(i,1).value is not None:
@@ -673,7 +736,7 @@ async def on_message(ctx):
                 i += 1
             await ctx.channel.send('Fool')
             return
-    except:
+    except IndexError:
         pass
     await bot.process_commands(ctx)
 
@@ -712,7 +775,7 @@ async def checkActive(player):
     for i in range(game.globalTurn-3, game.globalTurn):
         if player.voteHistory[i][0] is not 0:
             return
-    await botChannel.send('{} has been made inactive, use ~resurrect to rejoin the game'.format(player.discord.display_name))
+    await botChannel.send('{} has been made inactive, use ~resurrect to rejoin the game'.format(player.discord.mention))
     player.active = False
 
 @bot.command()
